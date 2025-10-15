@@ -16,6 +16,7 @@ import {
 } from 'react-native';
 import { openDatabaseAsync, SQLiteDatabase } from 'expo-sqlite';
 import * as Notifications from 'expo-notifications';
+import Svg, { Circle, Defs, LinearGradient as SvgLinearGradient, Polyline, Stop } from 'react-native-svg';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -85,11 +86,10 @@ const computeMetrics = (entries: PriceUpdate[]) => {
   };
 };
 
-// Normalize the recent prices into 0-1 values so we can render a sparkline bar chart.
 // Prepare sparkline data points from the cached trades.
 const computeSparklinePoints = (entries: PriceUpdate[]) => {
   if (entries.length < 2) {
-    return [];
+    return { points: [] as Array<{ key: number; price: number; normalized: number }>, min: null as number | null, max: null as number | null };
   }
 
   const chronological = [...entries].reverse();
@@ -98,10 +98,15 @@ const computeSparklinePoints = (entries: PriceUpdate[]) => {
   const min = Math.min(...prices);
   const range = max - min || 1;
 
-  return chronological.map(item => ({
-    key: item.timestamp,
-    value: (item.price - min) / range,
-  }));
+  return {
+    points: chronological.map(item => ({
+      key: item.timestamp,
+      price: item.price,
+      normalized: (item.price - min) / range,
+    })),
+    min,
+    max,
+  };
 };
 
 export default function App(): JSX.Element {
@@ -670,7 +675,48 @@ export default function App(): JSX.Element {
   }, [activeSymbol, persistAndCheckUpdate]);
 
   const metrics = useMemo(() => computeMetrics(updates), [updates]);
-  const sparklinePoints = useMemo(() => computeSparklinePoints(updates), [updates]);
+  const { points: sparklinePoints, min: sparklineMin, max: sparklineMax } = useMemo(
+    () => computeSparklinePoints(updates),
+    [updates]
+  );
+  const sparklineChart = useMemo(() => {
+    // Build an SVG-friendly representation of the last trades for a smooth sparkline.
+    const height = 48;
+    if (!sparklinePoints.length) {
+      return {
+        viewBoxWidth: 1,
+        height,
+        pointsString: '',
+        latest: null as null | { x: number; y: number; price: number },
+      };
+    }
+
+    const count = sparklinePoints.length;
+    const width = count > 1 ? count - 1 : 1;
+    const verticalPadding = 4;
+    const usableHeight = height - verticalPadding * 2;
+    const polylinePoints = sparklinePoints
+      .map((point, index) => {
+        const x = count === 1 ? 0 : (index / (count - 1)) * width;
+        const y = height - (point.normalized * usableHeight + verticalPadding);
+        return `${x.toFixed(2)},${y.toFixed(2)}`;
+      })
+      .join(' ');
+
+    const latest = sparklinePoints[count - 1];
+    const latestPoint = {
+      x: count === 1 ? 0 : width,
+      y: height - (latest.normalized * usableHeight + verticalPadding),
+      price: latest.price,
+    };
+
+    return {
+      viewBoxWidth: width,
+      height,
+      pointsString: polylinePoints,
+      latest: latestPoint,
+    };
+  }, [sparklinePoints]);
 
   const renderItem = ({ item }: ListRenderItemInfo<PriceUpdate>) => {
     const isFresh = freshTimestamp !== null && item.timestamp === freshTimestamp;
@@ -814,12 +860,37 @@ export default function App(): JSX.Element {
       </View>
       {sparklinePoints.length ? (
         <View style={styles.sparkline}>
-          {sparklinePoints.map((point, index) => (
-            <View
-              key={`${activeSymbol}-spark-${point.key}-${index}`}
-              style={[styles.sparklineBar, { height: Math.max(6, point.value * 40) }]}
-            />
-          ))}
+          <View style={styles.sparklineHeader}>
+            <Text style={styles.sparklineLabel}>Price trend (last 20 trades)</Text>
+            {sparklineMin !== null && sparklineMax !== null ? (
+              <Text style={styles.sparklineRange}>
+                {sparklineMin.toFixed(2)} – {sparklineMax.toFixed(2)}
+              </Text>
+            ) : null}
+          </View>
+          {sparklineChart.pointsString ? (
+            <Svg
+              style={styles.sparklineChart}
+              viewBox={`0 0 ${sparklineChart.viewBoxWidth} ${sparklineChart.height}`}
+              preserveAspectRatio="none"
+            >
+              <Defs>
+                <SvgLinearGradient id={`sparkline-gradient-${activeSymbol}`} x1="0" y1="0" x2="0" y2="1">
+                  <Stop offset="0%" stopColor="#63b3ed" stopOpacity={0.9} />
+                  <Stop offset="100%" stopColor="#3182ce" stopOpacity={0.2} />
+                </SvgLinearGradient>
+              </Defs>
+              <Polyline
+                points={sparklineChart.pointsString}
+                fill="none"
+                stroke={`url(#sparkline-gradient-${activeSymbol})`}
+                strokeWidth={0.9}
+              />
+              {sparklineChart.latest ? (
+                <Circle cx={sparklineChart.latest.x} cy={sparklineChart.latest.y} r={1.2} fill="#63b3ed" />
+              ) : null}
+            </Svg>
+          ) : null}
         </View>
       ) : null}
       <FlatList
@@ -1235,22 +1306,33 @@ const styles = StyleSheet.create({
     color: '#f56565',
   },
   sparkline: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    height: 48,
-    paddingVertical: 8,
-    paddingHorizontal: 6,
+    backgroundColor: '#151d2b',
     borderRadius: 12,
     borderWidth: 1,
     borderColor: '#2d3748',
-    backgroundColor: '#151d2b',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     marginBottom: 16,
   },
-  sparklineBar: {
-    width: 4,
-    marginHorizontal: 1,
-    borderRadius: 2,
-    backgroundColor: '#63b3ed',
+  sparklineHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  sparklineLabel: {
+    color: '#f7fafc',
+    fontSize: 12,
+    fontWeight: '600',
+    letterSpacing: 0.2,
+  },
+  sparklineRange: {
+    color: '#9aa5b1',
+    fontSize: 12,
+  },
+  sparklineChart: {
+    width: '100%',
+    height: 48,
   },
   historyOverlay: {
     flex: 1,
