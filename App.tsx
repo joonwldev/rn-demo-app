@@ -860,6 +860,7 @@ export default function App(): JSX.Element {
       </View>
       {sparklinePoints.length ? (
         <View style={styles.sparkline}>
+          {/* Show a quick legend so readers know the min/max that the line chart spans. */}
           <View style={styles.sparklineHeader}>
             <Text style={styles.sparklineLabel}>Price trend (last 20 trades)</Text>
             {sparklineMin !== null && sparklineMax !== null ? (
