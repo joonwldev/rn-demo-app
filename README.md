@@ -18,7 +18,8 @@ This Expo SDK 53 / React Native 0.79 demo streams real-time trade ticks from the
    npx expo install expo-sqlite expo-notifications react-native-svg
    ```
 2. **Configure Finnhub**
-   - Replace `FINNHUB_TOKEN` in `App.tsx` with your API key.
+   - Copy `.env.example` to `.env` and paste your API key as `EXPO_PUBLIC_FINNHUB_TOKEN=...`.
+   - Expo automatically inlines `EXPO_PUBLIC_*` variables at build time; the app will stay in an error state until the token is provided.
    - Free keys stream limited symbols (IEX for equities) – use `BINANCE:BTCUSDT` for off-hours testing.
 3. **Start the app**
    ```bash

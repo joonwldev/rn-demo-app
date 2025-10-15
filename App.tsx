@@ -53,7 +53,7 @@ type AlertThreshold = {
   triggered: boolean;
 };
 
-const FINNHUB_TOKEN = '***REMOVED***';
+const FINNHUB_TOKEN = (process.env.EXPO_PUBLIC_FINNHUB_TOKEN ?? '').trim();
 const DEFAULT_SYMBOL = 'AAPL';
 const QUICK_SYMBOLS = ['AAPL', 'TSLA', 'BINANCE:BTCUSDT'];
 const MAX_ITEMS = 20;
@@ -127,6 +127,7 @@ export default function App(): JSX.Element {
   const [alertPriceText, setAlertPriceText] = useState('');
   const [alertError, setAlertError] = useState<string | null>(null);
   const [notificationAllowed, setNotificationAllowed] = useState(false);
+  const hasToken = FINNHUB_TOKEN.length > 0;
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -576,6 +577,22 @@ export default function App(): JSX.Element {
     let manualClose = false;
     const symbolForSession = activeSymbol;
 
+    if (!hasToken) {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      setConnectionStatus('error');
+      setErrorMessage('Set EXPO_PUBLIC_FINNHUB_TOKEN to stream live data.');
+      return () => {
+        manualClose = true;
+      };
+    }
+
     const scheduleReconnect = () => {
       if (manualClose || reconnectTimerRef.current) {
         return;
@@ -672,7 +689,7 @@ export default function App(): JSX.Element {
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [activeSymbol, persistAndCheckUpdate]);
+  }, [activeSymbol, persistAndCheckUpdate, hasToken]);
 
   const metrics = useMemo(() => computeMetrics(updates), [updates]);
   const { points: sparklinePoints, min: sparklineMin, max: sparklineMax } = useMemo(
@@ -753,8 +770,10 @@ export default function App(): JSX.Element {
         <Text style={styles.statusText}>Status: {connectionStatus}</Text>
         <Text style={styles.statusText}>Symbol: {activeSymbol}</Text>
         {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
-        {FINNHUB_TOKEN === 'YOUR_API_KEY' ? (
-          <Text style={styles.warningText}>Replace YOUR_API_KEY with a valid Finnhub API token.</Text>
+        {!hasToken ? (
+          <Text style={styles.warningText}>
+            Set EXPO_PUBLIC_FINNHUB_TOKEN before running to stream live data.
+          </Text>
         ) : null}
         <Pressable style={styles.historyButton} onPress={handleOpenHistory}>
           <Text style={styles.historyButtonText}>View History</Text>
