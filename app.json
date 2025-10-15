@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "rn-demo-app",
-    "slug": "rn-demo-app",
+    "slug": "rn-demo",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -28,6 +28,18 @@
     },
     "plugins": [
       "expo-sqlite"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "8a2a4a37-9e4e-434c-8c4e-eb85e17f3d29"
+      }
+    },
+    "owner": "songcry",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/8a2a4a37-9e4e-434c-8c4e-eb85e17f3d29"
+    }
   }
 }
