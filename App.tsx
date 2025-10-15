@@ -13,6 +13,7 @@ import {
   Text,
   TextInput,
   View,
+  LogBox,
 } from 'react-native';
 import { openDatabaseAsync, SQLiteDatabase } from 'expo-sqlite';
 import * as Notifications from 'expo-notifications';
@@ -25,6 +26,11 @@ Notifications.setNotificationHandler({
     shouldSetBadge: false,
   }),
 });
+
+// Suppress Expo Go warning about deprecated remote pushes; we only use local notifications.
+LogBox.ignoreLogs([
+  'expo-notifications: Android Push notifications (remote notifications) functionality provided by expo-notifications was removed from Expo Go with the release of SDK 53. Use a development build instead of Expo Go. Read more at https://docs.expo.dev/develop/development-builds/introduction/.',
+]);
 
 type PriceUpdate = {
   key: string;
