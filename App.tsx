@@ -1,5 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FlatList, ListRenderItemInfo, Pressable, SafeAreaView, StyleSheet, Text, TextInput, View } from 'react-native';
+import {
+  FlatList,
+  ListRenderItemInfo,
+  Modal,
+  Pressable,
+  SafeAreaView,
+  SectionList,
+  SectionListData,
+  SectionListRenderItemInfo,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { openDatabaseAsync, SQLiteDatabase } from 'expo-sqlite';
 
 type PriceUpdate = {
@@ -9,10 +22,23 @@ type PriceUpdate = {
   timestamp: number;
 };
 
+type HistoryEntry = {
+  key: string;
+  symbol: string;
+  price: number;
+  timestamp: number;
+};
+
+type HistorySection = {
+  title: string;
+  data: HistoryEntry[];
+};
+
 const FINNHUB_TOKEN = '***REMOVED***';
 const DEFAULT_SYMBOL = 'AAPL';
 const QUICK_SYMBOLS = ['AAPL', 'TSLA', 'BINANCE:BTCUSDT'];
 const MAX_ITEMS = 20;
+const DB_MAX_ITEMS = 60;
 const DB_NAME = 'priceUpdates.db';
 
 const formatTimestamp = (timestamp: number) => {
@@ -41,6 +67,7 @@ const computeMetrics = (entries: PriceUpdate[]) => {
 };
 
 // Normalize the recent prices into 0-1 values so we can render a sparkline bar chart.
+// Prepare sparkline data points from the cached trades.
 const computeSparklinePoints = (entries: PriceUpdate[]) => {
   if (entries.length < 2) {
     return [];
@@ -66,6 +93,10 @@ export default function App(): JSX.Element {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [freshTimestamp, setFreshTimestamp] = useState<number | null>(null);
   const [isDbReady, setIsDbReady] = useState(false);
+  const [historyVisible, setHistoryVisible] = useState(false);
+  const [historySections, setHistorySections] = useState<HistorySection[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -105,7 +136,67 @@ export default function App(): JSX.Element {
     }
   }, []);
 
-  // Write the newest trade to SQLite and prune the table so we only keep the last 20 rows per symbol.
+  const loadHistory = useCallback(async () => {
+    const db = dbRef.current;
+    if (!db) {
+      setHistorySections([]);
+      setHistoryLoading(false);
+      setHistoryError('History unavailable until storage initializes.');
+      return;
+    }
+
+    try {
+      const rows = await db.getAllAsync(
+        `SELECT symbol, price, timestamp FROM price_updates ORDER BY symbol ASC, timestamp DESC;`
+      );
+
+      const grouped = new Map<string, HistoryEntry[]>();
+
+      rows.forEach((row, index) => {
+        const symbolValue = typeof row.symbol === 'string' ? row.symbol : String(row.symbol ?? '');
+        const priceValue = typeof row.price === 'number' ? row.price : Number(row.price);
+        const timestampValue = typeof row.timestamp === 'number' ? row.timestamp : Number(row.timestamp);
+        const entry: HistoryEntry = {
+          key: `${symbolValue}-${timestampValue}-${index}`,
+          symbol: symbolValue,
+          price: Number.isNaN(priceValue) ? 0 : priceValue,
+          timestamp: Number.isNaN(timestampValue) ? Date.now() : timestampValue,
+        };
+
+        if (!grouped.has(symbolValue)) {
+          grouped.set(symbolValue, []);
+        }
+        grouped.get(symbolValue)?.push(entry);
+      });
+
+      const sortedSymbols = Array.from(grouped.keys()).sort((a, b) => a.localeCompare(b));
+      sortedSymbols.sort((a, b) => {
+        if (a === activeSymbol) {
+          return -1;
+        }
+        if (b === activeSymbol) {
+          return 1;
+        }
+        return a.localeCompare(b);
+      });
+
+      const sections: HistorySection[] = sortedSymbols.map(symbol => ({
+        title: symbol,
+        data: grouped.get(symbol) ?? [],
+      }));
+
+      setHistorySections(sections);
+      setHistoryError(sections.length ? null : 'No cached history yet.');
+    } catch (err) {
+      console.warn('SQLite history load error', err);
+      setHistoryError('Failed to load history.');
+      setHistorySections([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [activeSymbol]);
+
+  // Write the newest trade to SQLite and prune the table so we only keep a capped history per symbol.
   const persistUpdate = useCallback(async (update: PriceUpdate) => {
     const db = dbRef.current;
     if (!db) {
@@ -126,7 +217,7 @@ export default function App(): JSX.Element {
              ORDER BY timestamp DESC
              LIMIT ?
            );`,
-        [update.symbol, update.symbol, MAX_ITEMS]
+        [update.symbol, update.symbol, DB_MAX_ITEMS]
       );
     } catch (err) {
       console.warn('SQLite write error', err);
@@ -167,6 +258,24 @@ export default function App(): JSX.Element {
     },
     [applySymbol]
   );
+
+  const handleOpenHistory = useCallback(() => {
+    setHistoryVisible(true);
+    setHistoryError(null);
+    if (!isDbReady) {
+      setHistorySections([]);
+      setHistoryError('History unavailable until storage initializes.');
+      return;
+    }
+    setHistoryLoading(true);
+    void loadHistory();
+  }, [isDbReady, loadHistory]);
+
+  const handleCloseHistory = useCallback(() => {
+    setHistoryVisible(false);
+    setHistoryLoading(false);
+    setHistoryError(null);
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -336,6 +445,22 @@ export default function App(): JSX.Element {
     );
   };
 
+  const renderHistoryItem = ({ item }: SectionListRenderItemInfo<HistoryEntry>) => (
+    <View style={styles.historyRow}>
+      <View style={styles.historyRowHeader}>
+        <Text style={styles.historyRowPrice}>{item.price.toFixed(2)}</Text>
+        <Text style={styles.historyRowTimestamp}>{formatTimestamp(item.timestamp)}</Text>
+      </View>
+    </View>
+  );
+
+  const renderHistorySectionHeader = ({ section }: { section: SectionListData<HistoryEntry> }) => (
+    <View style={styles.historySectionHeader}>
+      <Text style={styles.historySectionTitle}>{section.title}</Text>
+      <Text style={styles.historySectionMeta}>{section.data.length} stored</Text>
+    </View>
+  );
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.statusContainer}>
@@ -345,6 +470,9 @@ export default function App(): JSX.Element {
         {FINNHUB_TOKEN === 'YOUR_API_KEY' ? (
           <Text style={styles.warningText}>Replace YOUR_API_KEY with a valid Finnhub API token.</Text>
         ) : null}
+        <Pressable style={styles.historyButton} onPress={handleOpenHistory}>
+          <Text style={styles.historyButtonText}>View History</Text>
+        </Pressable>
       </View>
       <View style={styles.symbolControls}>
         <TextInput
@@ -427,6 +555,40 @@ export default function App(): JSX.Element {
           </View>
         }
       />
+      <Modal
+        animationType="slide"
+        transparent
+        visible={historyVisible}
+        onRequestClose={handleCloseHistory}
+      >
+        <View style={styles.historyOverlay}>
+          <View style={styles.historySheet}>
+            <View style={styles.historySheetHeader}>
+              <Text style={styles.historyTitle}>Cached History</Text>
+              <Pressable onPress={handleCloseHistory}>
+                <Text style={styles.historyCloseText}>Close</Text>
+              </Pressable>
+            </View>
+            {historyLoading ? (
+              <Text style={styles.historyStatus}>Loading…</Text>
+            ) : historyError ? (
+              <Text style={styles.historyStatus}>{historyError}</Text>
+            ) : (
+              <SectionList
+                sections={historySections}
+                renderItem={renderHistoryItem}
+                renderSectionHeader={renderHistorySectionHeader}
+                keyExtractor={item => item.key}
+                contentContainerStyle={
+                  historySections.length === 0 ? styles.historyEmpty : undefined
+                }
+                stickySectionHeadersEnabled={false}
+                showsVerticalScrollIndicator={false}
+              />
+            )}
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -454,6 +616,19 @@ const styles = StyleSheet.create({
     marginTop: 4,
     color: '#ecc94b',
     fontSize: 12,
+  },
+  historyButton: {
+    marginTop: 12,
+    alignSelf: 'flex-start',
+    backgroundColor: '#2c5282',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  historyButtonText: {
+    color: '#f7fafc',
+    fontSize: 12,
+    fontWeight: '600',
   },
   symbolControls: {
     flexDirection: 'row',
@@ -555,6 +730,87 @@ const styles = StyleSheet.create({
     marginHorizontal: 1,
     borderRadius: 2,
     backgroundColor: '#63b3ed',
+  },
+  historyOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 22, 36, 0.85)',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  historySheet: {
+    backgroundColor: '#0f1624',
+    borderRadius: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderWidth: 1,
+    borderColor: '#2d3748',
+    maxHeight: '80%',
+  },
+  historySheetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  historyTitle: {
+    color: '#f7fafc',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  historyCloseText: {
+    color: '#63b3ed',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  historyStatus: {
+    color: '#9aa5b1',
+    fontSize: 14,
+    textAlign: 'center',
+    paddingVertical: 24,
+  },
+  historyEmpty: {
+    paddingVertical: 40,
+    alignItems: 'center',
+  },
+  historySectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    backgroundColor: '#151d2b',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginTop: 8,
+  },
+  historySectionTitle: {
+    color: '#f7fafc',
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  historySectionMeta: {
+    color: '#9aa5b1',
+    fontSize: 12,
+  },
+  historyRow: {
+    backgroundColor: '#0f1b2d',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#1f2a3c',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginTop: 8,
+  },
+  historyRowHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  historyRowPrice: {
+    color: '#f6ad55',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  historyRowTimestamp: {
+    color: '#9aa5b1',
+    fontSize: 12,
   },
   row: {
     padding: 12,
