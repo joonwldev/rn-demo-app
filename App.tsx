@@ -613,11 +613,6 @@ export default function App(): JSX.Element {
       try {
         const payload = JSON.parse(data);
         const trades: Array<Record<string, unknown>> = Array.isArray(payload?.data) ? payload.data : [];
-        console.log('Finnhub message', {
-          type: payload?.type,
-          tradeCount: trades.length,
-          sample: trades[0],
-        });
         if (!trades.length) {
           return;
         }
