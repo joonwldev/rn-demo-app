@@ -1378,4 +1378,3 @@ const styles = StyleSheet.create({
     color: '#718096',
   },
 });
-const ALERT_MAX_ITEMS = 20;
