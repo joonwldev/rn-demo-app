@@ -23,6 +23,7 @@ const formatTimestamp = (timestamp: number) => {
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
 };
 
+// Reduce the buffered price updates into simple analytics for the header.
 const computeMetrics = (entries: PriceUpdate[]) => {
   if (!entries.length) {
     return { change: 0, percentage: 0, basis: null as number | null, latest: null as number | null };
@@ -39,6 +40,7 @@ const computeMetrics = (entries: PriceUpdate[]) => {
   };
 };
 
+// Normalize the recent prices into 0-1 values so we can render a sparkline bar chart.
 const computeSparklinePoints = (entries: PriceUpdate[]) => {
   if (entries.length < 2) {
     return [];
@@ -69,6 +71,7 @@ export default function App(): JSX.Element {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dbRef = useRef<SQLiteDatabase | null>(null);
 
+  // Replay the most recent trades for a symbol from SQLite when the app boots or the user switches symbols.
   const loadCachedUpdates = useCallback(async (symbol: string) => {
     const db = dbRef.current;
     if (!db) {
@@ -102,6 +105,7 @@ export default function App(): JSX.Element {
     }
   }, []);
 
+  // Write the newest trade to SQLite and prune the table so we only keep the last 20 rows per symbol.
   const persistUpdate = useCallback(async (update: PriceUpdate) => {
     const db = dbRef.current;
     if (!db) {
@@ -129,6 +133,7 @@ export default function App(): JSX.Element {
     }
   }, []);
 
+  // Normalize user input and trigger a subscription switch.
   const applySymbol = useCallback(
     (rawSymbol: string) => {
       const normalized = rawSymbol.trim().toUpperCase();
@@ -166,6 +171,7 @@ export default function App(): JSX.Element {
   useEffect(() => {
     let isMounted = true;
 
+    // Lazily open the database; we do it once and cache the handle for subsequent queries.
     const initializeDbAsync = async () => {
       try {
         const db = await openDatabaseAsync(DB_NAME);
@@ -203,6 +209,7 @@ export default function App(): JSX.Element {
     };
   }, []);
 
+  // Whenever the active symbol changes, refill the list from SQLite so the UI updates instantly.
   useEffect(() => {
     if (!isDbReady) {
       return;
@@ -210,6 +217,7 @@ export default function App(): JSX.Element {
     void loadCachedUpdates(activeSymbol);
   }, [activeSymbol, isDbReady, loadCachedUpdates]);
 
+  // Handle the WebSocket lifecycle and reconnects for the currently selected symbol.
   useEffect(() => {
     let manualClose = false;
     const symbolForSession = activeSymbol;
