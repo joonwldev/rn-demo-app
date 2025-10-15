@@ -3,6 +3,7 @@ import {
   FlatList,
   ListRenderItemInfo,
   Modal,
+  Platform,
   Pressable,
   SafeAreaView,
   SectionList,
@@ -14,6 +15,15 @@ import {
   View,
 } from 'react-native';
 import { openDatabaseAsync, SQLiteDatabase } from 'expo-sqlite';
+import * as Notifications from 'expo-notifications';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: false,
+    shouldSetBadge: false,
+  }),
+});
 
 type PriceUpdate = {
   key: string;
@@ -34,11 +44,20 @@ type HistorySection = {
   data: HistoryEntry[];
 };
 
+type AlertThreshold = {
+  id: string;
+  symbol: string;
+  direction: 'above' | 'below';
+  price: number;
+  triggered: boolean;
+};
+
 const FINNHUB_TOKEN = '***REMOVED***';
 const DEFAULT_SYMBOL = 'AAPL';
 const QUICK_SYMBOLS = ['AAPL', 'TSLA', 'BINANCE:BTCUSDT'];
 const MAX_ITEMS = 20;
 const DB_MAX_ITEMS = 60;
+const ALERT_MAX_ITEMS = 20;
 const DB_NAME = 'priceUpdates.db';
 
 const formatTimestamp = (timestamp: number) => {
@@ -97,10 +116,47 @@ export default function App(): JSX.Element {
   const [historySections, setHistorySections] = useState<HistorySection[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [alerts, setAlerts] = useState<AlertThreshold[]>([]);
+  const [alertModalVisible, setAlertModalVisible] = useState(false);
+  const [alertDirection, setAlertDirection] = useState<'above' | 'below'>('above');
+  const [alertPriceText, setAlertPriceText] = useState('');
+  const [alertError, setAlertError] = useState<string | null>(null);
+  const [notificationAllowed, setNotificationAllowed] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dbRef = useRef<SQLiteDatabase | null>(null);
+
+  useEffect(() => {
+    const ensurePermissionsAsync = async () => {
+      try {
+        const settings = await Notifications.getPermissionsAsync();
+        if (settings.granted || settings.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL) {
+          setNotificationAllowed(true);
+          if (Platform.OS === 'android') {
+            await Notifications.setNotificationChannelAsync('price-alerts', {
+              name: 'Price Alerts',
+              importance: Notifications.AndroidImportance.DEFAULT,
+            });
+          }
+          return;
+        }
+        const request = await Notifications.requestPermissionsAsync();
+        const granted = request.granted || request.ios?.status === Notifications.IosAuthorizationStatus.PROVISIONAL;
+        setNotificationAllowed(granted);
+        if (granted && Platform.OS === 'android') {
+          await Notifications.setNotificationChannelAsync('price-alerts', {
+            name: 'Price Alerts',
+            importance: Notifications.AndroidImportance.DEFAULT,
+          });
+        }
+      } catch (err) {
+        console.warn('Notification permission error', err);
+      }
+    };
+
+    void ensurePermissionsAsync();
+  }, []);
 
   // Replay the most recent trades for a symbol from SQLite when the app boots or the user switches symbols.
   const loadCachedUpdates = useCallback(async (symbol: string) => {
@@ -133,6 +189,35 @@ export default function App(): JSX.Element {
     } catch (err) {
       console.warn('SQLite read error', err);
       setErrorMessage('Failed to load cached data.');
+    }
+  }, []);
+
+  // Pull the stored alert thresholds for the active symbol.
+  const loadAlerts = useCallback(async (symbol: string) => {
+    const db = dbRef.current;
+    if (!db) {
+      setAlerts([]);
+      return;
+    }
+    try {
+      const rows = await db.getAllAsync(
+        `SELECT id, symbol, direction, price, triggered
+         FROM price_alerts
+         WHERE symbol = ?
+         ORDER BY triggered ASC, price ASC
+         LIMIT ?;`,
+        [symbol, ALERT_MAX_ITEMS]
+      );
+      const nextAlerts: AlertThreshold[] = rows.map(row => ({
+        id: String(row.id),
+        symbol: typeof row.symbol === 'string' ? row.symbol : String(row.symbol ?? ''),
+        direction: row.direction === 'below' ? 'below' : 'above',
+        price: typeof row.price === 'number' ? row.price : Number(row.price),
+        triggered: row.triggered === 1,
+      }));
+      setAlerts(nextAlerts);
+    } catch (err) {
+      console.warn('SQLite alerts load error', err);
     }
   }, []);
 
@@ -224,6 +309,86 @@ export default function App(): JSX.Element {
     }
   }, []);
 
+  // Evaluate stored alerts against the latest trade and dispatch local notifications.
+  const checkAlertsForUpdate = useCallback(
+    async (update: PriceUpdate) => {
+      const db = dbRef.current;
+      if (!db) {
+        return;
+      }
+
+      try {
+        const rows = await db.getAllAsync(
+          `SELECT id, direction, price FROM price_alerts WHERE symbol = ? AND triggered = 0;`,
+          [update.symbol]
+        );
+
+        if (!rows.length) {
+          return;
+        }
+
+        const triggeredIds: number[] = [];
+        await Promise.all(
+          rows.map(async row => {
+            const direction = row.direction === 'below' ? 'below' : 'above';
+            const priceValue = typeof row.price === 'number' ? row.price : Number(row.price);
+            if (Number.isNaN(priceValue)) {
+              return;
+            }
+
+            const isTriggered =
+              (direction === 'above' && update.price >= priceValue) ||
+              (direction === 'below' && update.price <= priceValue);
+
+            if (!isTriggered) {
+              return;
+            }
+
+            triggeredIds.push(row.id);
+
+            if (notificationAllowed) {
+              try {
+                await Notifications.scheduleNotificationAsync({
+                  content: {
+                    title: `${update.symbol} price alert`,
+                    body:
+                      direction === 'above'
+                        ? `Price moved above ${priceValue.toFixed(2)} (now ${update.price.toFixed(2)}).`
+                        : `Price fell below ${priceValue.toFixed(2)} (now ${update.price.toFixed(2)}).`,
+                    channelId: Platform.OS === 'android' ? 'price-alerts' : undefined,
+                  },
+                  trigger: null,
+                });
+              } catch (err) {
+                console.warn('Notification scheduling error', err);
+              }
+            }
+          })
+        );
+
+        if (triggeredIds.length) {
+          const placeholders = triggeredIds.map(() => '?').join(', ');
+          await db.runAsync(
+            `UPDATE price_alerts SET triggered = 1 WHERE id IN (${placeholders});`,
+            triggeredIds
+          );
+          await loadAlerts(update.symbol);
+        }
+      } catch (err) {
+        console.warn('Alert evaluation error', err);
+      }
+    },
+    [loadAlerts, notificationAllowed]
+  );
+
+  const persistAndCheckUpdate = useCallback(
+    async (update: PriceUpdate) => {
+      await persistUpdate(update);
+      await checkAlertsForUpdate(update);
+    },
+    [checkAlertsForUpdate, persistUpdate]
+  );
+
   // Normalize user input and trigger a subscription switch.
   const applySymbol = useCallback(
     (rawSymbol: string) => {
@@ -258,6 +423,71 @@ export default function App(): JSX.Element {
     },
     [applySymbol]
   );
+
+  const handleOpenAlertModal = useCallback(() => {
+    const latestPrice = updates[0]?.price;
+    setAlertPriceText(latestPrice ? latestPrice.toFixed(2) : '');
+    setAlertDirection('above');
+    setAlertError(null);
+    setAlertModalVisible(true);
+  }, [updates]);
+
+  const handleCloseAlertModal = useCallback(() => {
+    setAlertModalVisible(false);
+    setAlertError(null);
+  }, []);
+
+  const handleRemoveAlert = useCallback(async (alertId: string) => {
+    const db = dbRef.current;
+    if (!db) {
+      return;
+    }
+    try {
+      await db.runAsync(`DELETE FROM price_alerts WHERE id = ?;`, [Number(alertId)]);
+      await loadAlerts(activeSymbol);
+    } catch (err) {
+      console.warn('Alert delete error', err);
+    }
+  }, [activeSymbol, loadAlerts]);
+
+  // Persist a new alert threshold for the current symbol.
+  const handleSaveAlert = useCallback(async () => {
+    const db = dbRef.current;
+    if (!db) {
+      setAlertError('Storage not ready yet.');
+      return;
+    }
+
+    const price = Number(alertPriceText);
+    if (Number.isNaN(price) || price <= 0) {
+      setAlertError('Enter a valid price greater than zero.');
+      return;
+    }
+
+    try {
+      await db.runAsync(
+        `INSERT INTO price_alerts (symbol, direction, price, triggered) VALUES (?, ?, ?, 0);`,
+        [activeSymbol, alertDirection, price]
+      );
+      await db.runAsync(
+        `DELETE FROM price_alerts
+         WHERE symbol = ?
+           AND id NOT IN (
+             SELECT id FROM price_alerts
+             WHERE symbol = ?
+             ORDER BY triggered ASC, id DESC
+             LIMIT ?
+           );`,
+        [activeSymbol, activeSymbol, ALERT_MAX_ITEMS]
+      );
+      await loadAlerts(activeSymbol);
+      setAlertModalVisible(false);
+      setAlertError(null);
+    } catch (err) {
+      console.warn('Alert insert error', err);
+      setAlertError('Failed to save alert.');
+    }
+  }, [activeSymbol, alertDirection, alertPriceText, loadAlerts]);
 
   const handleOpenHistory = useCallback(() => {
     setHistoryVisible(true);
@@ -297,6 +527,15 @@ export default function App(): JSX.Element {
              timestamp INTEGER NOT NULL
            );`
         );
+        await db.runAsync(
+          `CREATE TABLE IF NOT EXISTS price_alerts (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             symbol TEXT NOT NULL,
+             direction TEXT NOT NULL,
+             price REAL NOT NULL,
+             triggered INTEGER NOT NULL DEFAULT 0
+           );`
+        );
       } catch (err) {
         console.warn('SQLite init error', err);
         if (isMounted) {
@@ -324,7 +563,8 @@ export default function App(): JSX.Element {
       return;
     }
     void loadCachedUpdates(activeSymbol);
-  }, [activeSymbol, isDbReady, loadCachedUpdates]);
+    void loadAlerts(activeSymbol);
+  }, [activeSymbol, isDbReady, loadCachedUpdates, loadAlerts]);
 
   // Handle the WebSocket lifecycle and reconnects for the currently selected symbol.
   useEffect(() => {
@@ -376,7 +616,7 @@ export default function App(): JSX.Element {
           });
           setFreshTimestamp(timestamp);
           setErrorMessage(null);
-          void persistUpdate(update);
+          void persistAndCheckUpdate(update);
         });
       } catch (err) {
         console.warn('WebSocket parse error', err);
@@ -427,7 +667,7 @@ export default function App(): JSX.Element {
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [activeSymbol, persistUpdate]);
+  }, [activeSymbol, persistAndCheckUpdate]);
 
   const metrics = useMemo(() => computeMetrics(updates), [updates]);
   const sparklinePoints = useMemo(() => computeSparklinePoints(updates), [updates]);
@@ -502,6 +742,44 @@ export default function App(): JSX.Element {
           );
         })}
       </View>
+      <View style={styles.alertsContainer}>
+        <View style={styles.alertsHeader}>
+          <Text style={styles.alertsTitle}>Alerts</Text>
+          <Pressable style={styles.alertsAddButton} onPress={handleOpenAlertModal}>
+            <Text style={styles.alertsAddButtonText}>Add</Text>
+          </Pressable>
+        </View>
+        {!notificationAllowed ? (
+          <Text style={styles.alertsPermission}>
+            Enable notifications in system settings to receive alert banners.
+          </Text>
+        ) : null}
+        {alerts.length ? (
+          alerts.map(alert => (
+            <View
+              key={alert.id}
+              style={[
+                styles.alertRow,
+                alert.triggered ? styles.alertRowTriggered : styles.alertRowActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.alertRowText,
+                  alert.triggered ? styles.alertRowTextTriggered : null,
+                ]}
+              >
+                {alert.symbol} {alert.direction === 'above' ? '≥' : '≤'} {alert.price.toFixed(2)}
+              </Text>
+              <Pressable onPress={() => handleRemoveAlert(alert.id)}>
+                <Text style={styles.alertRemoveText}>Remove</Text>
+              </Pressable>
+            </View>
+          ))
+        ) : (
+          <Text style={styles.alertsEmpty}>No alerts configured.</Text>
+        )}
+      </View>
       <View style={styles.analyticsContainer}>
         <View style={styles.metricBlock}>
           <Text style={styles.metricLabel}>Last Price</Text>
@@ -555,6 +833,76 @@ export default function App(): JSX.Element {
           </View>
         }
       />
+      <Modal
+        animationType="fade"
+        transparent
+        visible={alertModalVisible}
+        onRequestClose={handleCloseAlertModal}
+      >
+        <View style={styles.alertOverlay}>
+          <View style={styles.alertSheet}>
+            <Text style={styles.alertTitle}>Create Price Alert</Text>
+            <Text style={styles.alertSubtitle}>Notify when {activeSymbol} trades…</Text>
+            <View style={styles.alertToggleRow}>
+              <Pressable
+                style={[
+                  styles.alertToggle,
+                  alertDirection === 'above' ? styles.alertToggleActive : null,
+                ]}
+                onPress={() => setAlertDirection('above')}
+              >
+                <Text
+                  style={[
+                    styles.alertToggleText,
+                    alertDirection === 'above' ? styles.alertToggleTextActive : null,
+                  ]}
+                >
+                  At or above
+                </Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.alertToggle,
+                  styles.alertToggleLast,
+                  alertDirection === 'below' ? styles.alertToggleActive : null,
+                ]}
+                onPress={() => setAlertDirection('below')}
+              >
+                <Text
+                  style={[
+                    styles.alertToggleText,
+                    alertDirection === 'below' ? styles.alertToggleTextActive : null,
+                  ]}
+                >
+                  At or below
+                </Text>
+              </Pressable>
+            </View>
+            <TextInput
+              value={alertPriceText}
+              onChangeText={setAlertPriceText}
+              placeholder="Price target"
+              placeholderTextColor="#4a5568"
+              keyboardType="decimal-pad"
+              style={styles.alertInput}
+            />
+            {alertError ? <Text style={styles.alertError}>{alertError}</Text> : null}
+            {!notificationAllowed ? (
+              <Text style={styles.alertPermissionWarning}>
+                Alerts will be stored, but enable notifications to see banners.
+              </Text>
+            ) : null}
+            <View style={styles.alertActions}>
+              <Pressable style={styles.alertCancelButton} onPress={handleCloseAlertModal}>
+                <Text style={styles.alertCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable style={styles.alertSaveButton} onPress={handleSaveAlert}>
+                <Text style={styles.alertSaveText}>Save Alert</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
       <Modal
         animationType="slide"
         transparent
@@ -682,6 +1030,179 @@ const styles = StyleSheet.create({
   },
   symbolChipTextActive: {
     color: '#48bb78',
+  },
+  alertsContainer: {
+    backgroundColor: '#151d2b',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2d3748',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginBottom: 12,
+  },
+  alertsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  alertsTitle: {
+    color: '#f7fafc',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  alertsAddButton: {
+    backgroundColor: '#3182ce',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  alertsAddButtonText: {
+    color: '#f7fafc',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  alertsPermission: {
+    color: '#ecc94b',
+    fontSize: 12,
+    marginBottom: 6,
+  },
+  alertsEmpty: {
+    color: '#9aa5b1',
+    fontSize: 12,
+    fontStyle: 'italic',
+  },
+  alertRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    marginTop: 6,
+  },
+  alertRowActive: {
+    borderColor: '#48bb78',
+    backgroundColor: '#1f2a3c',
+  },
+  alertRowTriggered: {
+    borderColor: '#4a5568',
+    backgroundColor: '#1a202c',
+  },
+  alertRowText: {
+    color: '#f7fafc',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  alertRowTextTriggered: {
+    color: '#718096',
+    textDecorationLine: 'line-through',
+  },
+  alertRemoveText: {
+    color: '#f56565',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  alertOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(15, 22, 36, 0.85)',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+  },
+  alertSheet: {
+    backgroundColor: '#0f1624',
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#2d3748',
+    paddingHorizontal: 20,
+    paddingVertical: 20,
+  },
+  alertTitle: {
+    color: '#f7fafc',
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  alertSubtitle: {
+    color: '#9aa5b1',
+    fontSize: 12,
+    marginBottom: 12,
+  },
+  alertToggleRow: {
+    flexDirection: 'row',
+    marginBottom: 12,
+  },
+  alertToggle: {
+    flex: 1,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#2d3748',
+    paddingVertical: 10,
+    marginRight: 8,
+    alignItems: 'center',
+  },
+  alertToggleLast: {
+    marginRight: 0,
+  },
+  alertToggleActive: {
+    borderColor: '#48bb78',
+    backgroundColor: '#1f2a3c',
+  },
+  alertToggleText: {
+    color: '#9aa5b1',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  alertToggleTextActive: {
+    color: '#48bb78',
+  },
+  alertInput: {
+    backgroundColor: '#151d2b',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#2d3748',
+    color: '#f7fafc',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    marginBottom: 12,
+  },
+  alertError: {
+    color: '#f56565',
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  alertPermissionWarning: {
+    color: '#ecc94b',
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  alertActions: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  alertCancelButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  alertCancelText: {
+    color: '#9aa5b1',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  alertSaveButton: {
+    backgroundColor: '#48bb78',
+    borderRadius: 10,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+  },
+  alertSaveText: {
+    color: '#0f1624',
+    fontSize: 14,
+    fontWeight: '700',
   },
   analyticsContainer: {
     flexDirection: 'row',
@@ -857,3 +1378,4 @@ const styles = StyleSheet.create({
     color: '#718096',
   },
 });
+const ALERT_MAX_ITEMS = 20;
