@@ -123,6 +123,7 @@ export default function App(): JSX.Element {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [freshTimestamp, setFreshTimestamp] = useState<number | null>(null);
   const [isDbReady, setIsDbReady] = useState(false);
+  const [isUsMarketOpen, setIsUsMarketOpen] = useState<boolean | null>(null);
   const [historyVisible, setHistoryVisible] = useState(false);
   const [historySections, setHistorySections] = useState<HistorySection[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -168,6 +169,28 @@ export default function App(): JSX.Element {
     };
 
     void ensurePermissionsAsync();
+  }, []);
+
+  useEffect(() => {
+    const updateMarketStatus = () => {
+      const now = new Date();
+      const day = now.getUTCDay();
+      const hour = now.getUTCHours();
+      const minute = now.getUTCMinutes();
+
+      // US regular market hours: 9:30 AM - 4:00 PM ET => 14:30 - 21:00 UTC (approx, ignoring DST).
+      const minutesOfDay = hour * 60 + minute;
+      const openMinutes = 14 * 60 + 30;
+      const closeMinutes = 21 * 60;
+
+      const weekday = day >= 1 && day <= 5;
+      const open = weekday && minutesOfDay >= openMinutes && minutesOfDay <= closeMinutes;
+      setIsUsMarketOpen(open);
+    };
+
+    updateMarketStatus();
+    const timer = setInterval(updateMarketStatus, 60 * 1000);
+    return () => clearInterval(timer);
   }, []);
 
   // Replay the most recent trades for a symbol from SQLite when the app boots or the user switches symbols.
@@ -794,6 +817,13 @@ export default function App(): JSX.Element {
           <Text style={styles.symbolButtonText}>Subscribe</Text>
         </Pressable>
       </View>
+      {isUsMarketOpen === false && activeSymbol && activeSymbol.indexOf(':') === -1 ? (
+        <View style={styles.marketNotice}>
+          <Text style={styles.marketNoticeText}>
+            U.S. equities may be idle outside regular market hours (9:30 AM – 4:00 PM ET).
+          </Text>
+        </View>
+      ) : null}
       <View style={styles.quickSymbols}>
         {QUICK_SYMBOLS.map(ticker => {
           const isActive = ticker === activeSymbol;
@@ -1325,6 +1355,19 @@ const styles = StyleSheet.create({
   },
   metricValueNegative: {
     color: '#f56565',
+  },
+  marketNotice: {
+    backgroundColor: '#1f2a3c',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2d3748',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 12,
+  },
+  marketNoticeText: {
+    color: '#ecc94b',
+    fontSize: 12,
   },
   sparkline: {
     backgroundColor: '#151d2b',
