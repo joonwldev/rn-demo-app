@@ -18,6 +18,12 @@ import {
 import { openDatabaseAsync, SQLiteDatabase } from 'expo-sqlite';
 import * as Notifications from 'expo-notifications';
 import Svg, { Circle, Defs, LinearGradient as SvgLinearGradient, Polyline, Stop } from 'react-native-svg';
+import {
+  computeMetrics,
+  computeSparklinePoints,
+  formatTimestamp,
+  isUsMarketOpen,
+} from './utils/market';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -66,54 +72,6 @@ const MAX_ITEMS = 20;
 const DB_MAX_ITEMS = 60;
 const ALERT_MAX_ITEMS = 20;
 const DB_NAME = 'priceUpdates.db';
-
-const formatTimestamp = (timestamp: number) => {
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) {
-    return 'Invalid date';
-  }
-  return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`;
-};
-
-// Reduce the buffered price updates into simple analytics for the header.
-const computeMetrics = (entries: PriceUpdate[]) => {
-  if (!entries.length) {
-    return { change: 0, percentage: 0, basis: null as number | null, latest: null as number | null };
-  }
-  const latest = entries[0].price;
-  const oldest = entries[entries.length - 1].price;
-  const change = latest - oldest;
-  const percentage = oldest !== 0 ? (change / oldest) * 100 : 0;
-  return {
-    change,
-    percentage,
-    basis: oldest,
-    latest,
-  };
-};
-
-// Prepare sparkline data points from the cached trades.
-const computeSparklinePoints = (entries: PriceUpdate[]) => {
-  if (entries.length < 2) {
-    return { points: [] as Array<{ key: number; price: number; normalized: number }>, min: null as number | null, max: null as number | null };
-  }
-
-  const chronological = [...entries].reverse();
-  const prices = chronological.map(item => item.price);
-  const max = Math.max(...prices);
-  const min = Math.min(...prices);
-  const range = max - min || 1;
-
-  return {
-    points: chronological.map(item => ({
-      key: item.timestamp,
-      price: item.price,
-      normalized: (item.price - min) / range,
-    })),
-    min,
-    max,
-  };
-};
 
 export default function App(): JSX.Element {
   const [activeSymbol, setActiveSymbol] = useState(DEFAULT_SYMBOL);
@@ -173,19 +131,7 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     const updateMarketStatus = () => {
-      const now = new Date();
-      const day = now.getUTCDay();
-      const hour = now.getUTCHours();
-      const minute = now.getUTCMinutes();
-
-      // US regular market hours: 9:30 AM - 4:00 PM ET => 14:30 - 21:00 UTC (approx, ignoring DST).
-      const minutesOfDay = hour * 60 + minute;
-      const openMinutes = 14 * 60 + 30;
-      const closeMinutes = 21 * 60;
-
-      const weekday = day >= 1 && day <= 5;
-      const open = weekday && minutesOfDay >= openMinutes && minutesOfDay <= closeMinutes;
-      setIsUsMarketOpen(open);
+      setIsUsMarketOpen(isUsMarketOpen(new Date()));
     };
 
     updateMarketStatus();
